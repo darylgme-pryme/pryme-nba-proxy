@@ -1,13 +1,33 @@
+/**
+ * PRYME NBA PROXY (Render) — FULL server.js
+ * Copy/paste this entire file into your GitHub repo as: server.js
+ *
+ * Endpoints:
+ *   GET /ping
+ *   GET /team-adv-slim?season=2025-26&last=3
+ *   GET /team-adv?season=2025-26&last=3   (optional raw passthrough)
+ *
+ * Features:
+ * - Slim output (TEAM_ID, TEAM_ABBREVIATION, OFF_RATING, DEF_RATING, PACE)
+ * - In-memory cache (60s) so repeat pulls are fast (helps Apps Script)
+ */
+
 import express from "express";
 import fetch from "node-fetch";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ✅ Simple in-memory cache (key -> { ts, payload })
+const cache = new Map();
+const CACHE_TTL_MS = 60 * 1000;
+
+// ---- Health check ----
 app.get("/ping", (req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
+// ---- Optional RAW passthrough (big JSON, can be slow) ----
 app.get("/team-adv", async (req, res) => {
   const season = req.query.season || "2025-26";
   const last = req.query.last || "3";
@@ -43,9 +63,20 @@ app.get("/team-adv", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
+
+// ---- SLIM endpoint (fast for Apps Script) ----
 app.get("/team-adv-slim", async (req, res) => {
   const season = req.query.season || "2025-26";
   const last = req.query.last || "3";
+
+  const key = `${season}|${last}`;
+  const now = Date.now();
+
+  // ✅ Serve cached payload if fresh
+  const cached = cache.get(key);
+  if (cached && (now - cached.ts) < CACHE_TTL_MS) {
+    return res.json({ ...cached.payload, cached: true });
+  }
 
   const nbaUrl = new URL("https://stats.nba.com/stats/leaguedashteamstats");
   nbaUrl.searchParams.set("Season", season);
@@ -72,6 +103,17 @@ app.get("/team-adv-slim", async (req, res) => {
       }
     });
 
+    // If NBA blocks or errors, forward status + a hint
+    if (!resp.ok) {
+      const t = await resp.text();
+      return res.status(resp.status).json({
+        ok: false,
+        status: resp.status,
+        statusText: resp.statusText,
+        sample: (t || "").slice(0, 500)
+      });
+    }
+
     const data = await resp.json();
     const rs = data?.resultSets?.[0];
     if (!rs?.headers || !rs?.rowSet) {
@@ -87,6 +129,14 @@ app.get("/team-adv-slim", async (req, res) => {
     const iDef    = idx("DEF_RATING");
     const iPace   = idx("PACE");
 
+    if ([iTeamId, iAbbr, iOff, iDef, iPace].some(i => i === -1)) {
+      return res.status(500).json({
+        ok: false,
+        error: "Expected headers not found",
+        headersSample: h.slice(0, 40)
+      });
+    }
+
     const rows = rs.rowSet.map(r => ([
       r[iTeamId],
       r[iAbbr],
@@ -95,16 +145,25 @@ app.get("/team-adv-slim", async (req, res) => {
       r[iPace]
     ]));
 
-    // Return a tiny, sheet-ready payload
-    return res.json({
+    const payload = {
       ok: true,
       season,
       last,
-      headers: ["TEAM_ID","TEAM_ABBREVIATION","OFF_RATING","DEF_RATING","PACE"],
+      headers: ["TEAM_ID", "TEAM_ABBREVIATION", "OFF_RATING", "DEF_RATING", "PACE"],
       rows
-    });
+    };
+
+    cache.set(key, { ts: now, payload });
+
+    return res.json(payload);
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
 });
+
+// ---- Root route (so base URL doesn't show Not Found) ----
+app.get("/", (req, res) => {
+  res.send("OK. Try /ping or /team-adv-slim?season=2025-26&last=3");
+});
+
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

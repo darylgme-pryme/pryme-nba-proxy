@@ -1,33 +1,30 @@
 /**
- * PRYME NBA PROXY (Render) — FULL server.js
- * Copy/paste this entire file into your GitHub repo as: server.js
- *
+ * PRYME NBA PROXY (Render) — CommonJS stable version
  * Endpoints:
  *   GET /ping
  *   GET /team-adv-slim?season=2025-26&last=3
- *   GET /team-adv?season=2025-26&last=3   (optional raw passthrough)
- *
- * Features:
- * - Slim output (TEAM_ID, TEAM_ABBREVIATION, OFF_RATING, DEF_RATING, PACE)
- * - In-memory cache (60s) so repeat pulls are fast (helps Apps Script)
+ *   GET /team-adv?season=2025-26&last=3  (optional raw passthrough)
  */
 
-import express from "express";
-import fetch from "node-fetch";
+const express = require("express");
+const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ✅ Simple in-memory cache (key -> { ts, payload })
+// In-memory cache (60s)
 const cache = new Map();
 const CACHE_TTL_MS = 60 * 1000;
 
-// ---- Health check ----
+app.get("/", (req, res) => {
+  res.send("OK. Try /ping or /team-adv-slim?season=2025-26&last=3");
+});
+
 app.get("/ping", (req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
-// ---- Optional RAW passthrough (big JSON, can be slow) ----
+// Optional RAW passthrough (big payload)
 app.get("/team-adv", async (req, res) => {
   const season = req.query.season || "2025-26";
   const last = req.query.last || "3";
@@ -64,7 +61,7 @@ app.get("/team-adv", async (req, res) => {
   }
 });
 
-// ---- SLIM endpoint (fast for Apps Script) ----
+// SLIM (what Apps Script should use)
 app.get("/team-adv-slim", async (req, res) => {
   const season = req.query.season || "2025-26";
   const last = req.query.last || "3";
@@ -72,7 +69,7 @@ app.get("/team-adv-slim", async (req, res) => {
   const key = `${season}|${last}`;
   const now = Date.now();
 
-  // ✅ Serve cached payload if fresh
+  // Serve cached payload
   const cached = cache.get(key);
   if (cached && (now - cached.ts) < CACHE_TTL_MS) {
     return res.json({ ...cached.payload, cached: true });
@@ -103,7 +100,6 @@ app.get("/team-adv-slim", async (req, res) => {
       }
     });
 
-    // If NBA blocks or errors, forward status + a hint
     if (!resp.ok) {
       const t = await resp.text();
       return res.status(resp.status).json({
@@ -115,8 +111,8 @@ app.get("/team-adv-slim", async (req, res) => {
     }
 
     const data = await resp.json();
-    const rs = data?.resultSets?.[0];
-    if (!rs?.headers || !rs?.rowSet) {
+    const rs = data && data.resultSets && data.resultSets[0];
+    if (!rs || !rs.headers || !rs.rowSet) {
       return res.status(500).json({ ok: false, error: "Bad NBA response" });
     }
 
@@ -124,10 +120,10 @@ app.get("/team-adv-slim", async (req, res) => {
     const idx = (name) => h.indexOf(name);
 
     const iTeamId = idx("TEAM_ID");
-    const iAbbr   = idx("TEAM_ABBREVIATION");
-    const iOff    = idx("OFF_RATING");
-    const iDef    = idx("DEF_RATING");
-    const iPace   = idx("PACE");
+    const iAbbr = idx("TEAM_ABBREVIATION");
+    const iOff = idx("OFF_RATING");
+    const iDef = idx("DEF_RATING");
+    const iPace = idx("PACE");
 
     if ([iTeamId, iAbbr, iOff, iDef, iPace].some(i => i === -1)) {
       return res.status(500).json({
@@ -154,16 +150,10 @@ app.get("/team-adv-slim", async (req, res) => {
     };
 
     cache.set(key, { ts: now, payload });
-
     return res.json(payload);
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
-});
-
-// ---- Root route (so base URL doesn't show Not Found) ----
-app.get("/", (req, res) => {
-  res.send("OK. Try /ping or /team-adv-slim?season=2025-26&last=3");
 });
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
